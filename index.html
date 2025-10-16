@@ -1,0 +1,744 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <title>検量線（cal_curve）</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { --gap:12px; }
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans JP", sans-serif; line-height: 1.6; margin: 24px; }
+    h1 { font-size: 1.4rem; margin-bottom: 0.2rem; }
+    fieldset { border: 1px solid #ccc; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; }
+    legend { padding: 0 6px; color: #444; }
+    label { display: inline-block; margin: 6px 12px 6px 0; }
+    input[type="text"], input[type="number"] { padding: 8px 10px; font-size: 16px; width: 100%; box-sizing: border-box; }
+    table { border-collapse: collapse; margin: 8px 0 16px; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: right; font-size: 15px; }
+    th { background: #f8f8f8; }
+    td:first-child, th:first-child { text-align: center; width: 56px; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
+    button { padding: 10px 14px; border-radius: 10px; border: 1px solid #999; background: #fff; cursor: pointer; font-size: 15px; }
+    button.primary { background: #2e6cff; color: #fff; border: 1px solid #2e6cff; }
+    .note { color: #666; font-size: 0.92rem; }
+    .warn { color: #b45309; }
+    .ok { color: #065f46; }
+    .result { padding: 10px 12px; border: 1px solid #ddd; border-radius: 8px; background: #f9fafb; margin-top: 12px; }
+    .grid { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(200px, 1fr)); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .subtle { color: #555; }
+    .chart-wrap { display: grid; gap: var(--gap); grid-template-columns: 1.5fr 1fr; align-items: start; }
+    .panel { border: 1px solid #ddd; border-radius: 8px; padding: 10px 12px; background: #fff; }
+    .panel h3 { margin: 0 0 6px; font-size: 1rem; }
+    .points-list { max-height: 320px; overflow: auto; border: 1px solid #eee; padding: 6px; border-radius: 6px; }
+    .points-list label { display: flex; justify-content: space-between; gap: 8px; font-variant-numeric: tabular-nums; }
+    .muted { color: #888; }
+
+    @media (max-width: 720px) {
+      body { margin: 16px; }
+      .grid { grid-template-columns: 1fr; }
+      .actions { flex-direction: column; }
+      button { width: 100%; }
+      .chart-wrap { grid-template-columns: 1fr; }
+      .points-list { max-height: 200px; }
+      th, td { font-size: 14px; }
+      input[type="text"], input[type="number"] { font-size: 16px; }
+    }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jstat@1.9.6/dist/jstat.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/exceljs/dist/exceljs.min.js"></script>
+</head>
+<body>
+  <h1>検量線作成ツール（分光光度計）</h1>
+  <p class="note">濃度は <span class="mono">1.2E-4</span> や <span class="mono">1.2*10^-4</span>、
+    <span class="mono">10^-4</span>、<span class="mono">E-04</span> のような表記も入力できます。</p>
+
+  <fieldset>
+    <legend>基本情報</legend>
+    <div class="grid">
+      <label>測定物質名：
+        <input id="sampleName" type="text" placeholder="例）グルコース" />
+      </label>
+      <label>濃度の単位（記号）：
+        <input id="concUnit" type="text" placeholder="例）mM, μM, mg/L など" />
+      </label>
+      <label>測定波長（nm）：
+        <input id="wavelength" type="number" inputmode="numeric" step="1" min="190" max="1100" placeholder="例）595" />
+      </label>
+      <label>サンプル数：
+        <input id="nSamples" type="number" inputmode="numeric" min="2" max="200" value="5" />
+      </label>
+    </div>
+    <div class="actions">
+      <button id="buildTableBtn">入力表を作成</button>
+      <button id="clearBtn">クリア</button>
+    </div>
+  </fieldset>
+
+  <div id="rawTableContainer"></div>
+
+  <fieldset>
+    <legend>ブランク補正（任意）</legend>
+    <label><input type="checkbox" id="doBlank" /> ブランク補正を行う</label>
+    <label>補正に用いる行番号：
+      <input id="blankRow" type="number" inputmode="numeric" min="1" value="1" />
+    </label>
+    <div class="actions">
+      <button id="applyBlankBtn">ブランク補正を適用</button>
+      <span id="blankStatus" class="note"></span>
+    </div>
+  </fieldset>
+
+  <div id="corrTableContainer"></div>
+
+  <fieldset>
+    <legend>検量線の作成</legend>
+    <div class="grid">
+      <label>係数の小数桁（a, b 表示用）：
+        <input id="coefDigits" type="number" inputmode="numeric" min="0" max="12" value="3" />
+      </label>
+      <button id="autoDigitsBtn">自動判定（入力桁から推定）</button>
+    </div>
+    <div class="actions">
+      <button id="fitBtn" class="primary">検量線を作成</button>
+      <button id="resetMaskBtn">除外のリセット</button>
+      <!-- Excel出力ボタン -->
+      <button id="exportExcelBtn">Excel出力（.xlsx）</button>
+    </div>
+
+    <!-- 逆算と不確かさ、外れ値の出力領域 -->
+    <div id="inverseBlock" class="result" style="display:none;">
+      <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+        <strong>逆算（A → 濃度）:</strong>
+        <input id="invA" type="text" placeholder="吸光度 A を入力" style="max-width:200px;">
+        <button id="invBtn">計算</button>
+        <span id="invOut" class="note"></span>
+      </div>
+    </div>
+
+    <div id="fitResult" class="result"></div>
+    <div id="uncertainty" class="result" style="display:none;"></div>
+    <div id="outlierInfo" class="result" style="display:none;"></div>
+
+    <div id="chartBlock" class="chart-wrap" style="display:none; margin-top:12px;">
+      <div class="panel">
+        <canvas id="chart" height="320"></canvas>
+      </div>
+      <div class="panel">
+        <h3>データ点の選択（再計算に反映）</h3>
+        <div id="pointsList" class="points-list"></div>
+        <p class="note muted" style="margin-top:8px;">
+          ※グラフ上の点をクリックしてもON/OFFできます（除外点は灰色）。
+        </p>
+      </div>
+    </div>
+  </fieldset>
+
+  <script>
+    // ================= ユーティリティ =================
+    function parseFlexibleNumber(str) {
+      if (str == null) return NaN;
+      const s = String(str).trim().replace(/,/g, "");
+      if (s === "") return NaN;
+
+      if (/^E[+\-]?\d+$/i.test(s)) {
+        const exp = parseInt(s.slice(1), 10); return Math.pow(10, exp);
+      }
+      if (/^10\^[+\-]?\d+$/i.test(s)) {
+        const exp = parseInt(s.split("^")[1], 10); return Math.pow(10, exp);
+      }
+      if (/^\*?10\^[+\-]?\d+$/i.test(s)) {
+        const exp = parseInt(s.replace(/^\*?10\^/i, ""), 10); return Math.pow(10, exp);
+      }
+      if (/^[+\-]?\d*\.?\d+\s*\*\s*10\^[+\-]?\d+$/i.test(s)) {
+        const [base, powPart] = s.split(/\*\s*10\^/i);
+        return parseFloat(base) * Math.pow(10, parseInt(powPart, 10));
+      }
+      const n = Number(s);
+      return Number.isFinite(n) ? n : NaN;
+    }
+
+    function decimalPlacesForAddSubFromInput(s) {
+      if (s == null) return 0;
+      s = String(s).trim();
+      if (s === "") return 0;
+      if (!/[eE]|10\^/.test(s)) {
+        const m = s.match(/\.(\d+)/); return m ? m[1].length : 0;
+      }
+      const plain = expandExponentialLikeToPlainDecimal(s);
+      const mm = plain.match(/\.(\d+)/);
+      return mm ? mm[1].length : 0;
+    }
+    function expandExponentialLikeToPlainDecimal(s) {
+      s = s.trim();
+      if (/^E[+\-]?\d+$/i.test(s)) s = "1e" + s.slice(1);
+      let m = s.match(/^([+\-]?\d*\.?\d+)\s*\*\s*10\^([+\-]?\d+)$/i);
+      if (m) return shiftDecimal(m[1], parseInt(m[2], 10));
+      m = s.match(/^\*?10\^([+\-]?\d+)$/i);
+      if (m) return shiftDecimal("1", parseInt(m[1], 10));
+      m = s.match(/^([+\-]?\d*\.?\d+)[eE]([+\-]?\d+)$/);
+      if (m) return shiftDecimal(m[1], parseInt(m[2], 10));
+      const n = Number(s); if (!Number.isFinite(n)) return s;
+      return n.toFixed(20).replace(/0+$/,'').replace(/\.$/,'');
+    }
+    function shiftDecimal(mant, exp) {
+      const sign = mant.startsWith("-") ? "-" : "";
+      mant = mant.replace(/^[+\-]/, "");
+      const parts = mant.split(".");
+      const intPart = parts[0] || "0";
+      const fracPart = parts[1] || "";
+      const digits = intPart + fracPart;
+      let point = intPart.length + exp;
+      if (point <= 0) return sign + "0." + "0".repeat(-point) + digits.replace(/^0+/,'') || "0";
+      if (point >= digits.length) return sign + digits + "0".repeat(point - digits.length);
+      return sign + digits.slice(0, point) + "." + digits.slice(point);
+    }
+
+    function countDecimalPlaces(str) {
+      const s = String(str).trim();
+      const m = s.match(/\.(\d+)/);
+      return m ? m[1].length : 0;
+    }
+
+    function inferDigitsFromInputs(xs, ys) {
+      const dpX = xs.map(v => countDecimalPlaces(v)).reduce((a,b)=>Math.max(a,b), 0);
+      const dpY = ys.map(v => countDecimalPlaces(v)).reduce((a,b)=>Math.max(a,b), 0);
+      return Math.min(12, Math.max(0, Math.max(dpX, dpY, 3)));
+    }
+
+    // 線形回帰（切片あり）＋不確かさ・外れ値指標
+    function regressWithStats(xs, ys) {
+      const n = xs.length;
+      const xbar = xs.reduce((a,b)=>a+b,0)/n;
+      const ybar = ys.reduce((a,b)=>a+b,0)/n;
+      const Sxx = xs.reduce((s,x)=> s + (x-xbar)**2, 0);
+      const Sxy = xs.reduce((s,x,i)=> s + (x-xbar)*(ys[i]-ybar), 0);
+      const a = Sxy / Sxx;
+      const b = ybar - a * xbar;
+      const yhat = xs.map(x => a*x + b);
+      const resid = ys.map((y,i)=> y - yhat[i]);
+
+      const SSE = resid.reduce((s,e)=> s + e*e, 0);
+      const dof = n - 2;
+      const s2 = SSE / dof; // MSE
+      const s = Math.sqrt(s2);
+      const r2 = 1 - SSE / ys.reduce((s,y)=> s + (y - ybar)**2, 0);
+
+      const SEa = Math.sqrt(s2 / Sxx);
+      const SEb = Math.sqrt(s2 * (1/n + xbar*xbar/Sxx));
+
+      // 95% CI (two-sided)
+      const tcrit = jStat.studentt.inv(0.975, dof);
+      const aCI = [a - tcrit*SEa, a + tcrit*SEa];
+      const bCI = [b - tcrit*SEb, b + tcrit*SEb];
+
+      // レバレッジ（hat）と studentized residual, Cook's D
+      const hat = xs.map(x => 1/n + (x-xbar)**2 / Sxx);
+      const stud = resid.map((e,i)=> e / (s * Math.sqrt(1 - hat[i])));
+      const cooks = resid.map((e,i)=> {
+        // p = #parameters = 2（傾き・切片）
+        const p = 2;
+        return (e*e / (p*s2)) * (hat[i] / (1 - hat[i])**2);
+      });
+
+      return { a,b,r2,SEa,SEb,aCI,bCI,s,dof,yhat,resid,hat,stud,cooks };
+    }
+
+    function formatR2Special(r2) {
+      if (!Number.isFinite(r2)) return "—";
+      if (Math.abs(r2 - 1) < 1e-15) return "1.0";
+      const s = r2.toFixed(16);
+      const [intPart, decPartRaw] = s.split(".");
+      if (!decPartRaw) return s;
+      let i = 0;
+      while (i < decPartRaw.length && decPartRaw[i] === "9") i++;
+      if (i === decPartRaw.length) {
+        return intPart + "." + decPartRaw.slice(0, Math.min(decPartRaw.length, 12));
+      } else {
+        const end = Math.min(decPartRaw.length, i + 2);
+        let out = decPartRaw.slice(0, end);
+        out = out.replace(/0+$/, "0");
+        return intPart + "." + out;
+      }
+    }
+
+    function toFixedSafe(n, digits) {
+      if (!Number.isFinite(n)) return "—";
+      return n.toFixed(digits);
+    }
+
+    function readTable(containerSelector) {
+      const cont = document.querySelector(containerSelector);
+      if (!cont) return { xs: [], ys: [] };
+      const xs = Array.from(cont.querySelectorAll("input.x")).map(i => i.value);
+      const ys = Array.from(cont.querySelectorAll("input.y")).map(i => i.value);
+      return { xs, ys };
+    }
+
+    function buildTable(n, unit) {
+      const container = document.createElement("div");
+      const title = document.createElement("div");
+      title.innerHTML = "<strong>測定値入力表</strong>";
+      container.appendChild(title);
+
+      const table = document.createElement("table");
+      const thead = document.createElement("thead");
+      const trh = document.createElement("tr");
+      trh.innerHTML = "<th>#</th>" +
+        `<th>濃度（${unit || "単位"}）</th>` +
+        "<th>吸光度</th>";
+      thead.appendChild(trh);
+      table.appendChild(thead);
+
+      const tbody = document.createElement("tbody");
+      for (let i = 1; i <= n; i++) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td>${i}</td>
+          <td><input type="text" class="x" inputmode="decimal" placeholder="例）0.100 または 1E-4" /></td>
+          <td><input type="text" class="y" inputmode="decimal" placeholder="例）0.123" /></td>`;
+        tbody.appendChild(tr);
+      }
+      table.appendChild(tbody);
+      container.appendChild(table);
+      return container;
+    }
+
+    function createCorrTable(rows) {
+      const container = document.createElement("div");
+      const title = document.createElement("div");
+      title.innerHTML = '<strong>ブランク補正した測定値</strong>';
+      container.appendChild(title);
+
+      const table = document.createElement("table");
+      const thead = document.createElement("thead");
+      thead.innerHTML = "<tr><th>#</th><th>濃度（補正前と同じ）</th><th>吸光度（補正後）</th></tr>";
+      table.appendChild(thead);
+
+      const tbody = document.createElement("tbody");
+      rows.forEach((r, idx) => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td>${idx + 1}</td>
+                        <td>${r.concStr}</td>
+                        <td>${r.yCorrDisp}</td>`;
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      container.appendChild(table);
+
+      const negNoteNeeded = rows.some(r => r.wasNegative);
+      if (negNoteNeeded) {
+        const note = document.createElement("div");
+        note.className = "note warn";
+        note.textContent = "補正後に0以下の吸光度を示す場合は0としている";
+        container.appendChild(note);
+      }
+      return container;
+    }
+
+    // ================== 状態 ==================
+    let includeMask = []; // 各データ点を回帰に含めるかどうか
+    let chart;            // Chart.js インスタンス
+    let lastFit = null;   // 逆算・Excel出力用に保持
+
+    // ================== DOM取得 ==================
+    const rawTableContainer = document.getElementById("rawTableContainer");
+    const corrTableContainer = document.getElementById("corrTableContainer");
+    const buildTableBtn = document.getElementById("buildTableBtn");
+    const clearBtn = document.getElementById("clearBtn");
+    const applyBlankBtn = document.getElementById("applyBlankBtn");
+    const fitBtn = document.getElementById("fitBtn");
+    const blankStatus = document.getElementById("blankStatus");
+    const autoDigitsBtn = document.getElementById("autoDigitsBtn");
+    const resetMaskBtn = document.getElementById("resetMaskBtn");
+    const chartBlock = document.getElementById("chartBlock");
+    const pointsList = document.getElementById("pointsList");
+
+    // 逆算・不確かさ・外れ値UI
+    const inverseBlock = document.getElementById("inverseBlock");
+    const invAInput = document.getElementById("invA");
+    const invBtn = document.getElementById("invBtn");
+    const invOut = document.getElementById("invOut");
+    const uncertaintyDiv = document.getElementById("uncertainty");
+    const outlierInfoDiv = document.getElementById("outlierInfo");
+    const exportExcelBtn = document.getElementById("exportExcelBtn");
+
+    // ================== イベント ==================
+    buildTableBtn.addEventListener("click", () => {
+      corrTableContainer.innerHTML = "";
+      blankStatus.textContent = "";
+      pointsList.innerHTML = "";
+      chartBlock.style.display = "none";
+      destroyChart();
+      inverseBlock.style.display = "none";
+      document.getElementById("fitResult").innerHTML = "";
+      uncertaintyDiv.style.display = "none";
+      outlierInfoDiv.style.display = "none";
+      invOut.textContent = "";
+
+      const n = parseInt(document.getElementById("nSamples").value, 10);
+      const unit = document.getElementById("concUnit").value.trim();
+      if (!Number.isFinite(n) || n < 2) {
+        alert("サンプル数は2以上の整数で入力してください。");
+        return;
+      }
+      rawTableContainer.innerHTML = "";
+      rawTableContainer.appendChild(buildTable(n, unit));
+      document.getElementById("blankRow").max = String(n);
+      includeMask = Array(n).fill(true);
+    });
+
+    clearBtn.addEventListener("click", () => {
+      rawTableContainer.innerHTML = "";
+      corrTableContainer.innerHTML = "";
+      blankStatus.textContent = "";
+      pointsList.innerHTML = "";
+      chartBlock.style.display = "none";
+      destroyChart();
+
+      document.getElementById("sampleName").value = "";
+      document.getElementById("concUnit").value = "";
+      document.getElementById("wavelength").value = "";
+      document.getElementById("nSamples").value = 5;
+      document.getElementById("coefDigits").value = 3;
+      document.getElementById("doBlank").checked = false;
+      document.getElementById("blankRow").value = 1;
+      document.getElementById("fitResult").innerHTML = "";
+      inverseBlock.style.display = "none";
+      invOut.textContent = "";
+      uncertaintyDiv.style.display = "none";
+      outlierInfoDiv.style.display = "none";
+      includeMask = [];
+      lastFit = null;
+    });
+
+    applyBlankBtn.addEventListener("click", () => {
+      corrTableContainer.innerHTML = "";
+      blankStatus.textContent = "";
+
+      const doBlank = document.getElementById("doBlank").checked;
+      if (!doBlank) {
+        blankStatus.textContent = "ブランク補正はオフです。";
+        return;
+      }
+      const { xs, ys } = readTable("#rawTableContainer");
+      if (xs.length === 0) {
+        alert("先に入力表を作成し、値を入力してください。");
+        return;
+      }
+      const n = xs.length;
+      const blankRow = parseInt(document.getElementById("blankRow").value, 10);
+      if (!(blankRow >= 1 && blankRow <= n)) {
+        alert("ブランク行番号が不正です。");
+        return;
+      }
+
+      const ysNum = ys.map(parseFlexibleNumber);
+      if (ysNum.some(v => !Number.isFinite(v))) {
+        alert("吸光度に不正な値があります。");
+        return;
+      }
+      const bval = ysNum[blankRow - 1];
+
+      const rows = ys.map((yStr, i) => {
+        const y = ysNum[i];
+        const dpy = decimalPlacesForAddSubFromInput(yStr);
+        const dpb = decimalPlacesForAddSubFromInput(ys[blankRow - 1]);
+        const dp = Math.min(dpy, dpb);
+
+        let yCorrRaw = y - bval;
+        const factor = Math.pow(10, dp);
+        let yCorr = Math.round(yCorrRaw * factor) / factor;
+
+        let wasNegative = false;
+        if (yCorr < 0) { yCorr = 0; wasNegative = true; }
+
+        const yCorrDisp = yCorr.toFixed(dp);
+        return { concStr: xs[i], yCorr, yCorrDisp, wasNegative };
+      });
+
+      corrTableContainer.appendChild(createCorrTable(rows));
+      blankStatus.innerHTML = `<span class="ok">ブランク補正を適用しました（行 ${blankRow} を使用）。</span>`;
+      includeMask = Array(n).fill(true);
+    });
+
+    autoDigitsBtn.addEventListener("click", () => {
+      const { xs, ys } = readTable("#rawTableContainer");
+      if (xs.length === 0) {
+        alert("先に入力表を作成し、値を入力してください。");
+        return;
+      }
+      const d = inferDigitsFromInputs(xs, ys);
+      document.getElementById("coefDigits").value = d;
+    });
+
+    resetMaskBtn.addEventListener("click", () => {
+      const len = getActiveDataStrings().xsStr.length;
+      includeMask = Array(len).fill(true);
+      updatePointsListAndChart();
+    });
+
+    fitBtn.addEventListener("click", () => {
+      computeAndRender();
+    });
+
+    // 逆算（A -> 濃度）
+    invBtn.addEventListener("click", () => {
+      if (!lastFit) { invOut.textContent = ""; return; }
+      const A = parseFlexibleNumber(invAInput.value);
+      if (!Number.isFinite(A)) { invOut.textContent = ""; return; }
+      const x = (A - lastFit.b) / lastFit.a; // 単位はx軸の単位と同じ
+      const unit = document.getElementById("concUnit").value.trim() || "単位";
+      invOut.textContent = `A=${A} → 推定濃度 ${x.toPrecision(6)} ${unit}`;
+    });
+
+    // Excel出力
+    exportExcelBtn.addEventListener("click", async () => {
+      if (!lastFit) { alert("先に検量線を作成してください。"); return; }
+      const wb = new ExcelJS.Workbook();
+      wb.creator = "cal_curve";
+      const wsData = wb.addWorksheet("Data");
+
+      const { xsStr, ysStr } = getActiveDataStrings();
+      wsData.addRow(["#", "濃度(入力テキスト)", "吸光度", "回帰に含む?"]);
+      xsStr.forEach((x,i)=> wsData.addRow([i+1, x, ysStr[i], includeMask[i] ? "yes" : "no"]));
+
+      const wsReg = wb.addWorksheet("Regression");
+      const name = document.getElementById("sampleName").value.trim() || "測定物質";
+      const wl = document.getElementById("wavelength").value || "λ";
+      wsReg.addRow(["式", `A_${wl} = ${lastFit.a} [${name}] + ${lastFit.b}`]);
+      wsReg.addRow(["R^2", lastFit.r2]);
+      wsReg.addRow(["SE(a)", lastFit.SEa]);
+      wsReg.addRow(["95%CI(a)_low", lastFit.aCI[0]]);
+      wsReg.addRow(["95%CI(a)_high", lastFit.aCI[1]]);
+      wsReg.addRow(["SE(b)", lastFit.SEb]);
+      wsReg.addRow(["95%CI(b)_low", lastFit.bCI[0]]);
+      wsReg.addRow(["95%CI(b)_high", lastFit.bCI[1]]);
+      wsReg.addRow(["RMSE(s)", lastFit.s]);
+      wsReg.addRow(["dof", lastFit.dof]);
+      wsReg.addRow([]);
+      wsReg.addRow(["#", "x(数値)", "y", "残差", "studentized", "Cook's D"]);
+      lastFit._exportRows.forEach(r => wsReg.addRow(r));
+
+      const wsChart = wb.addWorksheet("Chart");
+      const png = document.getElementById("chart").toDataURL("image/png");
+      const imgId = wb.addImage({ base64: png.split(",")[1], extension:"png" });
+      wsChart.addImage(imgId, { tl:{ col:0, row:0 }, ext:{ width:900, height:450 } });
+
+      const buf = await wb.xlsx.writeBuffer();
+      const blob = new Blob([buf], {type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "calibration.xlsx";
+      a.click();
+    });
+
+    // ================ 計算＆描画メイン ================
+    function getActiveDataStrings() {
+      const corrTable = corrTableContainer.querySelector("table");
+      if (corrTable) {
+        const rows = Array.from(corrTable.querySelectorAll("tbody tr"));
+        const xsStr = rows.map(r => r.children[1].textContent.trim());
+        const ysStr = rows.map(r => r.children[2].textContent.trim());
+        return { xsStr, ysStr, used: "corr" };
+      } else {
+        const { xs, ys } = readTable("#rawTableContainer");
+        return { xsStr: xs, ysStr: ys, used: "raw" };
+      }
+    }
+
+    function computeAndRender() {
+      const sampleName = document.getElementById("sampleName").value.trim() || "測定物質";
+      const unit = document.getElementById("concUnit").value.trim() || "単位";
+      const lambda = document.getElementById("wavelength").value;
+      const digits = parseInt(document.getElementById("coefDigits").value, 10);
+
+      const { xsStr, ysStr, used } = getActiveDataStrings();
+      if (xsStr.length < 2) { alert("データ点が不足しています。"); return; }
+
+      const xsNumAll = xsStr.map(parseFlexibleNumber);
+      const ysNumAll = ysStr.map(parseFlexibleNumber);
+      if (xsNumAll.some(v => !Number.isFinite(v))) { alert("濃度に不正な値があります。"); return; }
+      if (ysNumAll.some(v => !Number.isFinite(v))) { alert("吸光度に不正な値があります。"); return; }
+
+      // includeMask 同期
+      if (includeMask.length !== xsNumAll.length) includeMask = Array(xsNumAll.length).fill(true);
+
+      // マスク適用
+      const xsNum = [], ysNum = [];
+      xsNumAll.forEach((x, i) => { if (includeMask[i]) { xsNum.push(x); ysNum.push(ysNumAll[i]); }});
+      if (xsNum.length < 2) { alert("回帰に含める点が2つ未満です。"); return; }
+
+      const fit = regressWithStats(xsNum, ysNum);
+      lastFit = fit;
+
+      // Excel出力時に行と指標を再現できるよう保持
+      fit._exportRows = xsNumAll.map((xAll,i)=>{
+        if (!includeMask[i]) return [i+1, xAll, ysNumAll[i], "", "", ""];
+        const idx = xsNum.findIndex((v, k)=> xsNumAll[i]===xsNum[k] && ysNumAll[i]===ysNum[k] && 
+                    (xsNum.slice(0,k).filter(v2=>v2===xsNum[k]).length === xsNumAll.slice(0,i).filter(v2=>v2===xsNumAll[i]).length));
+        // 安全のため簡便に計算
+        const e = ysNumAll[i] - (fit.a*xsNumAll[i] + fit.b);
+        const h = 1/xsNum.length + (xsNumAll[i]- (xsNum.reduce((a,b)=>a+b,0)/xsNum.length))**2 / xsNum.reduce((s,v)=> s+(v-(xsNum.reduce((a,b)=>a+b,0)/xsNum.length))**2,0);
+        const r = e / (fit.s * Math.sqrt(1 - h));
+        const D = (e*e / (2*fit.s*fit.s)) * (h / (1 - h)**2);
+        return [i+1, xAll, ysNumAll[i], e, r, D];
+      });
+
+      let showDigits = Number.isFinite(digits) ? digits : inferDigitsFromInputs(xsStr, ysStr);
+      showDigits = Math.min(12, Math.max(0, showDigits));
+      const aStr = toFixedSafe(fit.a, showDigits);
+      const bStr = toFixedSafe(fit.b, showDigits);
+      const r2Str = formatR2Special(fit.r2);
+      const wl = lambda ? `${lambda}` : "λ";
+
+      const eqHTML = `<div><strong>回帰式：</strong> A<sub>${wl}</sub> = ${aStr}[${sampleName}] + ${bStr}</div>`;
+      const r2HTML = `<div><strong>決定係数：</strong> R<sup>2</sup> = ${r2Str} <span class="subtle">（${used === "corr" ? "ブランク補正後データ" : "補正なしデータ"}・使用点 ${xsNum.length}/${xsNumAll.length}）</span></div>`;
+      const unitHTML = `<div class="subtle">※ 濃度単位：${unit}</div>`;
+      document.getElementById("fitResult").innerHTML = eqHTML + r2HTML + unitHTML;
+
+      // 不確かさブロック
+      uncertaintyDiv.style.display = "block";
+      const uncHTML = `
+        <div><strong>パラメータの不確かさ：</strong></div>
+        <div>SE(a) = ${fit.SEa.toPrecision(4)}, 95%CI(a) = [${fit.aCI[0].toPrecision(4)}, ${fit.aCI[1].toPrecision(4)}]</div>
+        <div>SE(b) = ${fit.SEb.toPrecision(4)}, 95%CI(b) = [${fit.bCI[0].toPrecision(4)}, ${fit.bCI[1].toPrecision(4)}]</div>
+        <div class="subtle">RMSE s = ${fit.s.toPrecision(4)}, 自由度 = ${fit.dof}</div>
+      `;
+      uncertaintyDiv.innerHTML = uncHTML;
+
+      // 外れ値指標
+      outlierInfoDiv.style.display = "block";
+      const n = xsNum.length;
+      const flags = fit.stud.map((z,i)=> (Math.abs(z) > 3) || (fit.cooks[i] > 4/n));
+      const flagged = flags.map((f,i)=> f ? `#${i+1}` : null).filter(Boolean).join(", ");
+      outlierInfoDiv.innerHTML = `
+        <div><strong>外れ値判定（候補）：</strong> |Studentized| > 3 または Cook's D > 4/n</div>
+        <div>候補: ${flagged || "なし"}</div>
+      `;
+
+      // 逆算UIを有効化
+      inverseBlock.style.display = "block";
+
+      // グラフ描画（回帰直線は全x範囲）
+      const xLabel = `[${sampleName}]（${unit}）`;
+      const yLabel = `A${wl === "λ" ? "_λ" : "_" + wl}`;
+      renderChart(xsNumAll, ysNumAll, includeMask, fit.a, fit.b, xLabel, yLabel);
+      chartBlock.style.display = "grid";
+      buildPointsList(xsNumAll, ysNumAll);
+    }
+
+    function renderChart(xsAll, ysAll, mask, a, b, xLabel, yLabel) {
+      const ctx = document.getElementById("chart").getContext("2d");
+
+      const includedPts = [];
+      const excludedPts = [];
+      xsAll.forEach((x, i) => {
+        const p = { x, y: ysAll[i], _idx: i };
+        (mask[i] ? includedPts : excludedPts).push(p);
+      });
+
+      const finiteXs = xsAll.filter(v => Number.isFinite(v));
+      const xMinAll = Math.min(...finiteXs);
+      const xMaxAll = Math.max(...finiteXs);
+      const regLine = [
+        { x: xMinAll, y: a * xMinAll + b },
+        { x: xMaxAll, y: a * xMaxAll + b }
+      ];
+
+      const datasets = [
+        {
+          label: "使用する点",
+          type: "scatter",
+          data: includedPts,
+          pointRadius: 4,
+          backgroundColor: "#2563eb"
+        },
+        {
+          label: "除外した点",
+          type: "scatter",
+          data: excludedPts,
+          pointRadius: 4,
+          backgroundColor: "#9ca3af"
+        },
+        {
+          label: "回帰直線",
+          type: "line",
+          data: regLine,
+          borderColor: "orange",
+          borderWidth: 2,
+          borderDash: [6, 6],
+          fill: false,
+          pointRadius: 0
+        }
+      ];
+
+      const options = {
+        responsive: true,
+        maintainAspectRatio: false,
+        parsing: false,
+        scales: {
+          x: { title: { display: true, text: xLabel } },
+          y: { title: { display: true, text: yLabel }, min: 0 }
+        },
+        plugins: { legend: { display: true } },
+        onClick: (evt, elements) => {
+          if (!elements.length) return;
+          const el = elements[0];
+          const dsIdx = el.datasetIndex;
+          const idxInDs = el.index;
+
+          if (dsIdx === 0) {
+            const origIdx = chart.data.datasets[0].data[idxInDs]._idx;
+            includeMask[origIdx] = false;
+            updatePointsListAndChart();
+          } else if (dsIdx === 1) {
+            const origIdx = chart.data.datasets[1].data[idxInDs]._idx;
+            includeMask[origIdx] = true;
+            updatePointsListAndChart();
+          }
+        },
+        animation: false
+      };
+
+      if (chart) {
+        chart.data.datasets = datasets;
+        chart.options = options;
+        chart.update();
+      } else {
+        chart = new Chart(ctx, { type: "scatter", data: { datasets }, options });
+      }
+    }
+
+    function destroyChart() {
+      if (chart) { chart.destroy(); chart = null; }
+    }
+
+    function buildPointsList(xsAll, ysAll) {
+      pointsList.innerHTML = "";
+      xsAll.forEach((x, i) => {
+        const row = document.createElement("label");
+        const left = document.createElement("span");
+        const right = document.createElement("span");
+
+        left.innerHTML = `#${i+1}  x=${x} , y=${ysAll[i]}`;
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.checked = !!includeMask[i];
+        cb.addEventListener("change", () => {
+          includeMask[i] = cb.checked;
+          updatePointsListAndChart();
+        });
+        right.appendChild(cb);
+
+        row.appendChild(left);
+        row.appendChild(right);
+        pointsList.appendChild(row);
+      });
+    }
+
+    function updatePointsListAndChart() {
+      computeAndRender();
+    }
+  </script>
+</body>
+</html>
